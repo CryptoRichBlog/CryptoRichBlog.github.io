@@ -1,0 +1,14 @@
+{
+  "epoch": 666,
+  "pool": {
+    "live_stake": 5815416,
+    "delegators": 9,
+    "blocks": 2
+  },
+  "drep": {
+    "live_stake": 2309679,
+    "delegators": 8,
+    "voting_power_this_epoch": 2089679
+  },
+  "source": "Koios (api.koios.rest), checked hourly"
+}
