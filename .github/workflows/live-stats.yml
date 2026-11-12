@@ -22,29 +22,47 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: git clone --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" site
 
-      - name: Read pool and DRep numbers from Koios
+      - name: Read pool and DRep numbers (AdaStat first, Koios if AdaStat fails)
         working-directory: site
         run: |
           python3 - <<'PY'
           import json, sys, urllib.request
 
-          K = 'https://api.koios.rest/api/v1/'
           POOL = 'pool1ezmnjmu9fw36ftprczhwhvqd60syaclpp74keu0yj7rty7r3dna'
+          POOL_HEX = 'c8b7396f854ba3a4ac23c0aeebb00dd3e04ee3e10fab6cf1e49786b2'
           DREP = 'drep1yfkn463gfmajw3v0nva9cds6cvzghsvv6pdgn2ywmqv684q9u7ph4'
+          DREP_HEX = '6d3aea284efb27458f9b3a5c361ac3048bc18cd05a89a88ed819a3d4'
+          K = 'https://api.koios.rest/api/v1/'
+          A = 'https://adastat.net/api/rest/v1/'
           ADA = 1_000_000
 
-          def call(path, body=None):
+          def fetch(url, body=None):
               data = None if body is None else json.dumps(body).encode()
-              req = urllib.request.Request(K + path, data=data, headers={
+              req = urllib.request.Request(url, data=data, headers={
                   'Accept': 'application/json', 'Content-Type': 'application/json',
-                  'User-Agent': 'crich.io live-stats'})
+                  'User-Agent': 'crich.io live-stats (+https://crich.io)'})
               with urllib.request.urlopen(req, timeout=30) as r:
                   return json.load(r)
 
+          # 1) AdaStat: the same numbers the hourly delegator check reads.
+          def from_adastat():
+              p = fetch(f'{A}pools/{POOL_HEX}.json')['data']
+              d = fetch(f'{A}dreps/{DREP_HEX}.json')['data']
+              if p.get('ticker') != 'CRICH' or d.get('bech32') != DREP:
+                  raise ValueError('AdaStat answered for a different pool or DRep')
+              return {
+                  'pool_live': int(p['live_stake']), 'pool_n': int(p['delegator']),
+                  'blocks': int(p.get('total_block') or 0),
+                  'drep_live': int(d['live_stake']), 'drep_n': int(d['delegator']),
+              }
+
+          # 2) Koios: its delegator list can lag by hours or miss accounts, so
+          #    pool owners and our DRep's delegators are added and every balance
+          #    is read from the account itself.
           def paged(path):
               rows, off = [], 0
               while True:
-                  page = call(f'{path}&limit=1000&offset={off}')
+                  page = fetch(f'{K}{path}&limit=1000&offset={off}')
                   rows += page
                   if len(page) < 1000:
                       return rows
@@ -53,43 +71,55 @@ jobs:
           def accounts(addrs):
               rows = []
               for i in range(0, len(addrs), 100):
-                  rows += call('account_info', {'_stake_addresses': addrs[i:i + 100]})
+                  rows += fetch(K + 'account_info', {'_stake_addresses': addrs[i:i + 100]})
               return rows
 
-          try:
-              tip = call('tip')[0]
-              pool = call('pool_info', {'_pool_bech32_ids': [POOL]})[0]
+          def from_koios():
+              pool = fetch(K + 'pool_info', {'_pool_bech32_ids': [POOL]})[0]
               pool_addrs = {d['stake_address'] for d in paged(f'pool_delegators?_pool_bech32={POOL}')}
-              pool_addrs |= set(pool.get('owners') or [])
-              pool_accts = [a for a in accounts(sorted(pool_addrs))
-                            if a.get('status') == 'registered' and a.get('delegated_pool') == POOL]
               drep_addrs = {d['stake_address'] for d in paged(f'drep_delegators?_drep_id={DREP}')}
-              drep_accts = [a for a in accounts(sorted(drep_addrs))
-                            if a.get('status') == 'registered' and a.get('delegated_drep') == DREP]
-              drep = call('drep_info', {'_drep_ids': [DREP]})[0]
-          except Exception as e:
-              print(f'::warning::Koios did not answer, stats.json left as it was ({e})')
+              everyone = sorted(pool_addrs | drep_addrs | set(pool.get('owners') or []))
+              accts = [a for a in accounts(everyone) if a.get('status') == 'registered']
+              in_pool = [a for a in accts if a.get('delegated_pool') == POOL]
+              in_drep = [a for a in accts if a.get('delegated_drep') == DREP]
+              return {
+                  'pool_live': sum(int(a.get('total_balance') or 0) for a in in_pool),
+                  'pool_n': len(in_pool), 'blocks': int(pool.get('block_count') or 0),
+                  'drep_live': sum(int(a.get('total_balance') or 0) for a in in_drep),
+                  'drep_n': len(in_drep),
+              }
+
+          got, source = None, None
+          for name, fn in (('AdaStat', from_adastat), ('Koios', from_koios)):
+              try:
+                  n = fn()
+                  if n['pool_live'] > 0 and n['drep_live'] > 0:
+                      got, source = n, name
+                      break
+                  print(f'::warning::{name} returned zero')
+              except Exception as e:
+                  print(f'::warning::{name} failed ({e})')
+          if not got:
+              print('::warning::No source answered, stats.json left as it was')
               sys.exit(0)
 
-          pool_live = sum(int(a.get('total_balance') or 0) for a in pool_accts)
-          drep_live = sum(int(a.get('total_balance') or 0) for a in drep_accts)
-          if pool_live <= 0 or drep_live <= 0:
-              print('::warning::Koios returned zero, stats.json left as it was')
-              sys.exit(0)
+          try:
+              epoch = fetch(K + 'tip')[0].get('epoch_no')
+          except Exception:
+              epoch = None
 
           out = {
-              'epoch': tip.get('epoch_no'),
+              'epoch': epoch,
               'pool': {
-                  'live_stake': round(pool_live / ADA),
-                  'delegators': len(pool_accts),
-                  'blocks': pool.get('block_count'),
+                  'live_stake': round(got['pool_live'] / ADA),
+                  'delegators': got['pool_n'],
+                  'blocks': got['blocks'],
               },
               'drep': {
-                  'live_stake': round(drep_live / ADA),
-                  'delegators': len(drep_accts),
-                  'voting_power_this_epoch': round(int(drep.get('amount') or 0) / ADA),
+                  'live_stake': round(got['drep_live'] / ADA),
+                  'delegators': got['drep_n'],
               },
-              'source': 'Koios (api.koios.rest), checked hourly',
+              'source': f'{source}, checked hourly',
           }
           with open('stats.json', 'w') as f:
               json.dump(out, f, indent=2)
@@ -111,5 +141,5 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Live stats (epoch $(python3 -c 'import json; print(json.load(open("stats.json"))["epoch"])'))"
+          git commit -m "Live stats ($(python3 -c 'import json; d=json.load(open("stats.json")); print(d["source"].split(",")[0], "epoch", d["epoch"])'))"
           git push
