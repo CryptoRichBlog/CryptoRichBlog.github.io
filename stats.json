@@ -6,8 +6,8 @@
     "blocks": 3
   },
   "drep": {
-    "live_stake": 2365995,
-    "delegators": 9,
+    "live_stake": 2816847,
+    "delegators": 10,
     "voting_power_this_epoch": 2365995
   },
   "source": "Koios (api.koios.rest), checked hourly"
