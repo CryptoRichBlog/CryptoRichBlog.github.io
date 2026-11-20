@@ -1,9 +1,9 @@
 {
   "epoch": 668,
   "pool": {
-    "live_stake": 6541003,
+    "live_stake": 6541692,
     "delegators": 11,
-    "blocks": 14
+    "blocks": 15
   },
   "drep": {
     "live_stake": 2850071,
