@@ -1,13 +1,13 @@
 {
   "epoch": 669,
   "pool": {
-    "live_stake": 7637717,
-    "delegators": 14,
+    "live_stake": 7637722,
+    "delegators": 15,
     "blocks": 18
   },
   "drep": {
-    "live_stake": 2915797,
-    "delegators": 14
+    "live_stake": 2915803,
+    "delegators": 15
   },
   "source": "AdaStat, checked hourly"
 }
